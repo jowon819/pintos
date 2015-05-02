@@ -18,8 +18,70 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+
+
+/* ##################################################### */
+
+/* Save parameter arguments to User Stack 
+   parse : arguments of program 
+   count : # of arguments
+   esp : stack pointer */
+   
+void 
+argument_stack(char **parse, int count, void **esp)
+{
+
+  uint32_t argv_address[count];
+  int i, j;
+
+  printf ("[Stack start] : %x\n", *esp);
+  for (i = count - 1 ; i > -1 ; i--)
+  {
+    for (j = strlen(parse[i]) ; j > -1 ; j--)
+    {
+      *esp = *esp - 1;
+      **(char **) esp = parse[i][j];
+    }
+    argv_address[i] = (uint32_t) *esp;
+  }
+
+
+  /* word align */
+  uint8_t word_align = 0;
+  *esp = *esp - 1;
+  *(uint8_t*) (*esp) = word_align;
+
+  /* last element null */
+  *esp = *esp - 4;
+  **(int **) esp = 0;
+
+  /* set argv address */
+  for (i = count - 1 ; i > -1 ; i--)
+  {
+    *esp = *esp - 4;
+    *(uint32_t *) (*esp) = argv_address[i];
+  }
+  
+  /* set parameter **argv */
+  *esp = *esp - 4;
+  **(int **) esp = (int)*esp + 4;
+
+  /* set parameter argc */
+  *esp = *esp - 4;
+  **(int **) esp = count;
+
+  /* fake address */
+  *esp = *esp - 4;
+  **(int**) esp = 0;
+
+}
+/* ##################################################### */
+
+
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -31,6 +93,22 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
+
+
+  /* ##################################################### */
+  // my declaration
+  char *exec_file_name; 
+  char *comm_line;
+
+
+  comm_line = palloc_get_page (0);
+  if (comm_line == NULL)
+    return TID_ERROR;
+  strlcpy (comm_line, file_name, PGSIZE);
+  /* ##################################################### */
+
+
+
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -38,8 +116,24 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+
+
+  /* ##################################################### */
+  /* tokenize argvs and get execute file name */
+
+  /* copy argvs from parameter(file_name) */
+  strlcpy (comm_line, file_name, PGSIZE);
+
+  char *token; // except file name
+  exec_file_name = strtok_r(comm_line, " ", &token);
+
+  /* ##################################################### */
+
+
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  /* changed : file_name -> exec_file_name */
+  tid = thread_create (exec_file_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -54,12 +148,50 @@ start_process (void *file_name_)
   struct intr_frame if_;
   bool success;
 
+
+
+  /* ##################################################### */
+  char *arguments[5];
+  char *comm_line = file_name_;
+  char *token;
+  char *save_ptr;
+  int count = 0;
+
+  /* Copy arguments */
+  /* copy argvs from parameter(file_name) */
+  strlcpy (comm_line, file_name, PGSIZE);
+
+  for (token = strtok_r (comm_line, " ", &save_ptr); token != NULL; 
+       token = strtok_r (NULL, " ", &save_ptr)) 
+  {
+    arguments[count++] = token;    
+  }
+  /* ##################################################### */
+  
+
+
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+
+  /* if_.eip : stack pointer */
+  /*** load program to stack and start program ***/
+  success = load (arguments[0], &if_.eip, &if_.esp);
+
+
+  
+  /* ##################################################### */
+  /* increase count 1 */
+  argument_stack(arguments, count, &if_.esp);
+
+  /* To test */
+   hex_dump(if_.esp, if_.esp, PHYS_BASE - if_.esp , true);
+
+  /* ##################################################### */
+
+  
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
@@ -219,6 +351,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;
+
   process_activate ();
 
   /* Open executable file. */
@@ -241,8 +374,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       printf ("load: %s: error loading executable\n", file_name);
       goto done; 
     }
-
-  /* Read program headers. */
+  
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
     {
@@ -291,6 +423,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
                   read_bytes = 0;
                   zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
                 }
+                /* load using allocation information */
               if (!load_segment (file, file_page, (void *) mem_page,
                                  read_bytes, zero_bytes, writable))
                 goto done;
